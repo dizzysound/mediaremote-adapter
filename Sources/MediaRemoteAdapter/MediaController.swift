@@ -11,6 +11,7 @@ public class MediaController {
     }
 
     private var listeningProcess: Process?
+    private var outputHandle: FileHandle?
     private var dataBuffer = Data()
     private var playbackTimer: Timer?
     private var playbackInfo: (baseTime: TimeInterval, baseTimestamp: TimeInterval)?
@@ -98,13 +99,17 @@ public class MediaController {
 
         let outputPipe = Pipe()
         listeningProcess?.standardOutput = outputPipe
+        dataBuffer.removeAll()
+        outputHandle = outputPipe.fileHandleForReading
 
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
             guard let self = self else { return }
 
             let incomingData = fileHandle.availableData
             if incomingData.isEmpty {
-                // This can happen when the process terminates.
+                // End of file: the helper exited. A handler left in place is called again at once,
+                // forever, keeping a core busy, so remove it.
+                fileHandle.readabilityHandler = nil
                 return
             }
 
@@ -135,9 +140,12 @@ public class MediaController {
 
         listeningProcess?.terminationHandler = { [weak self] process in
             DispatchQueue.main.async {
-                self?.listeningProcess = nil
-                self?.playbackTimer?.invalidate()
-                self?.onListenerTerminated?()
+                // Only the current listener: after stopListening(), or once a new one has started,
+                // an old process's exit must not clear the new one or report a termination.
+                guard let self = self, self.listeningProcess === process else { return }
+                self.listeningProcess = nil
+                self.playbackTimer?.invalidate()
+                self.onListenerTerminated?()
             }
         }
 
@@ -150,6 +158,8 @@ public class MediaController {
     }
 
     public func stopListening() {
+        outputHandle?.readabilityHandler = nil
+        outputHandle = nil
         listeningProcess?.terminate()
         playbackTimer?.invalidate()
         listeningProcess = nil
